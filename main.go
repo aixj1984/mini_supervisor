@@ -1,32 +1,38 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
+	"github.com/gorilla/mux"
 	"gopkg.in/natefinch/lumberjack.v2"
 	"gopkg.in/yaml.v3"
 )
 
 type LogConfig struct {
 	File       string `yaml:"file"`
-	MaxSize    int    `yaml:"max_size"` // MB
+	MaxSize    int    `yaml:"max_size"`
 	MaxBackups int    `yaml:"max_backups"`
-	MaxAge     int    `yaml:"max_age"` // days
+	MaxAge     int    `yaml:"max_age"`
 	Compress   bool   `yaml:"compress"`
 }
 
 type Service struct {
 	Name    string   `yaml:"name"`
 	Cmd     []string `yaml:"cmd"`
-	WorkDir string   `yaml:"work_dir"` // 可选字段
+	WorkDir string   `yaml:"work_dir"`
+	Auto    bool     `yaml:"auto"`
 }
 
 type ServiceState struct {
-	FailCount       int  // 连续失败次数
-	NotificationOff bool // 是否暂停通知
+	FailCount       int
+	NotificationOff bool
 }
 
 type Config struct {
@@ -35,15 +41,23 @@ type Config struct {
 	WebHookURL string    `yaml:"webhook_url"`
 }
 
+type ServiceManager struct {
+	Configs map[string]Service
+	States  map[string]*ServiceState
+	Procs   map[string]*exec.Cmd
+	Mutex   sync.Mutex
+	WebHook string
+}
+
 func setupLogger(cfg LogConfig) {
 	log.SetOutput(&lumberjack.Logger{
 		Filename:   cfg.File,
-		MaxSize:    cfg.MaxSize, // MB
+		MaxSize:    cfg.MaxSize,
 		MaxBackups: cfg.MaxBackups,
-		MaxAge:     cfg.MaxAge, // days
+		MaxAge:     cfg.MaxAge,
 		Compress:   cfg.Compress,
 	})
-	log.SetFlags(log.LstdFlags | log.Lshortfile) // [时间] + [文件:行号]
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -59,52 +73,178 @@ func loadConfig(path string) (*Config, error) {
 }
 
 func sendNotify(webhookURL, appName, status, content string) {
-	if len(webhookURL) == 0 {
+	if webhookURL == "" {
 		return
 	}
+	log.Printf("[通知] [%s] [%s]: %s\n", appName, status, content)
 	notify := new(WebHook)
 	notify.Send(webhookURL, appName, status, content)
 }
 
-func runService(svc Service, webhookURL string, state *ServiceState) {
-	for {
-		log.Printf("启动服务 [%s]: %v\n", svc.Name, svc.Cmd)
-
-		cmd := exec.Command(svc.Cmd[0], svc.Cmd[1:]...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-
-		if len(svc.WorkDir) > 0 {
-			cmd.Dir = svc.WorkDir
-		}
-
-		err := cmd.Start()
-		if err != nil {
-			log.Printf("服务 [%s] 启动失败: %v\n", svc.Name, err)
-			state.FailCount++
-			if state.FailCount <= 3 {
-				sendNotify(webhookURL, svc.Name, "launch error", err.Error())
-			} else {
-				log.Printf("服务 [%s] 通知暂停，因失败次数已达 %d\n", svc.Name, state.FailCount)
-			}
-			time.Sleep(3 * time.Second)
-			continue
-		}
-
-		// 服务成功启动
-		sendNotify(webhookURL, svc.Name, "service running", "ok")
-
-		err = cmd.Wait()
-		log.Printf("服务 [%s] 退出: %v\n", svc.Name, err)
-		state.FailCount++
-		if state.FailCount <= 3 {
-			sendNotify(webhookURL, svc.Name, "service exit", err.Error())
-		} else if !state.NotificationOff {
-			log.Printf("服务 [%s] 通知暂停，因失败次数已达 %d\n", svc.Name, state.FailCount)
-		}
-
-		time.Sleep(2 * time.Second)
+func (sm *ServiceManager) TryRunService(name string) {
+	sm.Mutex.Lock()
+	svc, ok := sm.Configs[name]
+	state := sm.States[name]
+	if !ok {
+		sm.Mutex.Unlock()
+		log.Printf("服务 [%s] 未找到\n", name)
+		return
 	}
+	if state.FailCount >= 3 {
+		sm.Mutex.Unlock()
+		log.Printf("服务 [%s] 超过失败上限，暂停自动重启\n", name)
+		return
+	}
+	sm.Mutex.Unlock()
+
+	cmd := exec.Command(svc.Cmd[0], svc.Cmd[1:]...)
+	if svc.WorkDir != "" {
+		cmd.Dir = svc.WorkDir
+	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	err := cmd.Start()
+	if err != nil {
+		sm.Mutex.Lock()
+		state.FailCount++
+		sm.Mutex.Unlock()
+
+		log.Printf("服务 [%s] 启动失败: %v\n", name, err)
+		sendNotify(sm.WebHook, name, "launch error", err.Error())
+		time.AfterFunc(3*time.Second, func() { sm.TryRunService(name) })
+		return
+	}
+
+	sm.Mutex.Lock()
+	sm.Procs[name] = cmd
+	sm.Mutex.Unlock()
+	sendNotify(sm.WebHook, name, "service running", "ok")
+
+	go sm.waitForExit(name, cmd)
+}
+
+func (sm *ServiceManager) waitForExit(name string, cmd *exec.Cmd) {
+	err := cmd.Wait()
+
+	sm.Mutex.Lock()
+	delete(sm.Procs, name)
+	state := sm.States[name]
+	state.FailCount++
+	sm.Mutex.Unlock()
+
+	log.Printf("服务 [%s] 退出: %v\n", name, err)
+	if state.FailCount <= 3 {
+		sendNotify(sm.WebHook, name, "service exit", err.Error())
+		time.AfterFunc(2*time.Second, func() {
+			sm.TryRunService(name)
+		})
+	} else {
+		log.Printf("服务 [%s] 达到失败上限，不再自动拉起\n", name)
+	}
+}
+
+func (sm *ServiceManager) StartService(name string) error {
+	sm.Mutex.Lock()
+	state := sm.States[name]
+	state.FailCount = 0
+	sm.Mutex.Unlock()
+	sm.TryRunService(name)
+	return nil
+}
+
+func (sm *ServiceManager) StopService(name string) error {
+	sm.Mutex.Lock()
+	cmd, ok := sm.Procs[name]
+	if !ok || cmd.Process == nil {
+		sm.Mutex.Unlock()
+		return fmt.Errorf("服务 [%s] 未运行", name)
+	}
+	err := cmd.Process.Kill()
+	delete(sm.Procs, name)
+	sm.Mutex.Unlock()
+	return err
+}
+
+func (sm *ServiceManager) RestartService(name string) error {
+	_ = sm.StopService(name)
+	time.Sleep(1 * time.Second)
+	sm.Mutex.Lock()
+	sm.States[name].FailCount = 0
+	sm.Mutex.Unlock()
+	sm.TryRunService(name)
+	return nil
+}
+
+func (sm *ServiceManager) ListServices(w http.ResponseWriter, r *http.Request) {
+	sm.Mutex.Lock()
+	defer sm.Mutex.Unlock()
+	result := make(map[string]interface{})
+	for name := range sm.Configs {
+		status := "stopped"
+		if cmd, ok := sm.Procs[name]; ok && cmd.Process != nil {
+			status = "running"
+		}
+		result[name] = map[string]interface{}{
+			"status":     status,
+			"fail_count": sm.States[name].FailCount,
+		}
+	}
+	json.NewEncoder(w).Encode(result)
+}
+
+func (sm *ServiceManager) GetServiceStatus(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	name := vars["name"]
+
+	sm.Mutex.Lock()
+	defer sm.Mutex.Unlock()
+	_, exists := sm.Configs[name]
+	if !exists {
+		http.Error(w, "服务未找到", 404)
+		return
+	}
+	status := "stopped"
+	if cmd, ok := sm.Procs[name]; ok && cmd.Process != nil {
+		status = "running"
+	}
+	resp := map[string]interface{}{
+		"name":       name,
+		"status":     status,
+		"fail_count": sm.States[name].FailCount,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (sm *ServiceManager) HandleAction(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	name := vars["name"]
+	action := vars["action"]
+	var err error
+	switch action {
+	case "start":
+		err = sm.StartService(name)
+	case "stop":
+		err = sm.StopService(name)
+	case "restart":
+		err = sm.RestartService(name)
+	default:
+		http.Error(w, "不支持的操作", 400)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+	} else {
+		w.Write([]byte("ok"))
+	}
+}
+
+func registerRoutes(sm *ServiceManager) {
+	r := mux.NewRouter()
+	r.HandleFunc("/services", sm.ListServices).Methods("GET")
+	r.HandleFunc("/services/{name}/status", sm.GetServiceStatus).Methods("GET")
+	r.HandleFunc("/services/{name}/{action}", sm.HandleAction).Methods("POST")
+	http.ListenAndServe(":8080", r)
 }
 
 func main() {
@@ -114,14 +254,24 @@ func main() {
 	}
 
 	setupLogger(cfg.Log)
+	log.Println("服务守护进程启动...")
 
-	log.Println("启动日志服务...")
-
-	states := make(map[string]*ServiceState)
-	for _, svc := range cfg.Services {
-		states[svc.Name] = &ServiceState{}
-		go runService(svc, cfg.WebHookURL, states[svc.Name])
+	manager := &ServiceManager{
+		Configs: make(map[string]Service),
+		States:  make(map[string]*ServiceState),
+		Procs:   make(map[string]*exec.Cmd),
+		WebHook: cfg.WebHookURL,
 	}
 
+	for _, svc := range cfg.Services {
+		manager.Configs[svc.Name] = svc
+		manager.States[svc.Name] = &ServiceState{}
+		if svc.Auto {
+			go manager.TryRunService(svc.Name)
+		}
+
+	}
+
+	go registerRoutes(manager)
 	select {} // 保持运行
 }

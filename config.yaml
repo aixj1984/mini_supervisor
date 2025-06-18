@@ -1,4 +1,4 @@
-webhook_url: https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxx
+webhook_url: https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxxxxxxxxxxx
 
 log:
   file: logs/app.log # 日志文件路径
@@ -11,6 +11,8 @@ services:
   - name: myapp
     cmd: ["/usr/local/bin/myapp", "--port", "8080"]
     work_dir: /usr/local/bin
+    auto: true
   - name: pingtest
     cmd: ["ping", "-c", "3", "8.8.8.8"]
     work_dir: /usr/local/bin
+    auto: false
