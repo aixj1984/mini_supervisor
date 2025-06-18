@@ -2,3 +2,4 @@ mini_supervisor
 mini_supervisor.exe
 dist/*
 logs/*
+config.yaml
