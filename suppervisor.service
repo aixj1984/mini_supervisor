@@ -1,0 +1,16 @@
+[Unit]
+Description=My Go App Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mini_supervisor        # 你程序的绝对路径
+Restart=on-failure                    # 异常时自动重启
+RestartSec=3                          # 重启延时
+User=root                           # 运行的用户, 不填，默认root
+WorkingDirectory=/usr/local/bin       # 可选：设置工作目录
+StandardOutput=append:/var/log/mini_supervisor.log
+StandardError=append:/var/log/mini_supervisor.err
+
+[Install]
+WantedBy=multi-user.target

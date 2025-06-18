@@ -1,0 +1,16 @@
+webhook_url: https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxx
+
+log:
+  file: logs/app.log # 日志文件路径
+  max_size: 10 # 单个日志文件最大 MB
+  max_backups: 5 # 最多保留 5 个旧文件
+  max_age: 7 # 最多保留 7 天
+  compress: true # 是否压缩归档旧日志
+
+services:
+  - name: myapp
+    cmd: ["/usr/local/bin/myapp", "--port", "8080"]
+    work_dir: /usr/local/bin
+  - name: pingtest
+    cmd: ["ping", "-c", "3", "8.8.8.8"]
+    work_dir: /usr/local/bin
