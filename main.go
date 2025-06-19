@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -98,19 +100,13 @@ func (sm *ServiceManager) TryRunService(name string) {
 	}
 	sm.Mutex.Unlock()
 
-	// 构造绝对路径，避免相对路径执行失败
-	// execPath := svc.Cmd[0]
-	// if !filepath.IsAbs(execPath) && svc.WorkDir != "" {
-	// 	execPath = filepath.Join(svc.WorkDir, execPath)
-	// }
-
 	cmd := exec.Command(svc.Cmd[0], svc.Cmd[1:]...)
 	if svc.WorkDir != "" {
 		cmd.Dir = svc.WorkDir
 	}
 	cmd.Stdout = os.Stdout
 	// var outBuf bytes.Buffer
-	// cmd.Stdout = &outBuf
+	// 	// cmd.Stdout = &outBuf
 	// cmd.Stderr = os.Stderr
 	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf
@@ -232,6 +228,18 @@ func (sm *ServiceManager) GetServiceStatus(w http.ResponseWriter, r *http.Reques
 	json.NewEncoder(w).Encode(resp)
 }
 
+func (sm *ServiceManager) Cleanup() {
+	log.Println("清理子进程...")
+	sm.Mutex.Lock()
+	defer sm.Mutex.Unlock()
+	for name, cmd := range sm.Procs {
+		if cmd.Process != nil {
+			log.Printf("终止服务 [%s] (PID=%d)\n", name, cmd.Process.Pid)
+			_ = cmd.Process.Kill()
+		}
+	}
+}
+
 func (sm *ServiceManager) HandleAction(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	name := vars["name"]
@@ -279,13 +287,21 @@ func main() {
 		WebHook: cfg.WebHookURL,
 	}
 
+	// 捕捉 Ctrl+C / kill 信号
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		manager.Cleanup()
+		os.Exit(0)
+	}()
+
 	for _, svc := range cfg.Services {
 		manager.Configs[svc.Name] = svc
 		manager.States[svc.Name] = &ServiceState{}
 		if svc.Auto {
 			go manager.TryRunService(svc.Name)
 		}
-
 	}
 
 	go registerRoutes(manager)
