@@ -1,4 +1,4 @@
-webhook_url: https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxxxxxxxxxxx
+webhook_url: https://open.feishu.cn/open-apis/bot/v2/hook/a54c101d-f3b7-452a-a19b-24029ca8cb57
 
 log:
   file: logs/app.log # 日志文件路径
@@ -11,8 +11,12 @@ services:
   - name: myapp
     cmd: ["/usr/local/bin/myapp", "--port", "8080"]
     work_dir: /usr/local/bin
-    auto: true
-  - name: pingtest
-    cmd: ["ping", "-c", "3", "8.8.8.8"]
-    work_dir: /usr/local/bin
     auto: false
+  - name: pingtest
+    cmd: ["ping", "www.baidu.com", "-t"]
+    work_dir:
+    auto: false
+  - name: telnet
+    cmd: ["./test.exe"]
+    work_dir: E:\\01project\\00go\\mini_supervisor
+    auto: true

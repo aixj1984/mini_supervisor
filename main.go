@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -97,12 +98,22 @@ func (sm *ServiceManager) TryRunService(name string) {
 	}
 	sm.Mutex.Unlock()
 
+	// 构造绝对路径，避免相对路径执行失败
+	// execPath := svc.Cmd[0]
+	// if !filepath.IsAbs(execPath) && svc.WorkDir != "" {
+	// 	execPath = filepath.Join(svc.WorkDir, execPath)
+	// }
+
 	cmd := exec.Command(svc.Cmd[0], svc.Cmd[1:]...)
 	if svc.WorkDir != "" {
 		cmd.Dir = svc.WorkDir
 	}
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// var outBuf bytes.Buffer
+	// cmd.Stdout = &outBuf
+	// cmd.Stderr = os.Stderr
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
 
 	err := cmd.Start()
 	if err != nil {
@@ -111,7 +122,8 @@ func (sm *ServiceManager) TryRunService(name string) {
 		sm.Mutex.Unlock()
 
 		log.Printf("服务 [%s] 启动失败: %v\n", name, err)
-		sendNotify(sm.WebHook, name, "launch error", err.Error())
+		log.Printf("执行路径: %s, 工作目录: %s\n", cmd.Path, cmd.Dir)
+		sendNotify(sm.WebHook, name, fmt.Sprintf("launch error：%d times", state.FailCount), err.Error())
 		time.AfterFunc(3*time.Second, func() { sm.TryRunService(name) })
 		return
 	}
@@ -121,21 +133,25 @@ func (sm *ServiceManager) TryRunService(name string) {
 	sm.Mutex.Unlock()
 	sendNotify(sm.WebHook, name, "service running", "ok")
 
-	go sm.waitForExit(name, cmd)
+	go sm.waitForExit(name, cmd, &errBuf)
 }
 
-func (sm *ServiceManager) waitForExit(name string, cmd *exec.Cmd) {
+func (sm *ServiceManager) waitForExit(name string, cmd *exec.Cmd, errBuf *bytes.Buffer) {
 	err := cmd.Wait()
-
 	sm.Mutex.Lock()
 	delete(sm.Procs, name)
 	state := sm.States[name]
 	state.FailCount++
 	sm.Mutex.Unlock()
+	if err != nil {
+		log.Printf("服务 [%s] 退出: %s\n", name, err.Error())
+		log.Printf("服务 [%s] 错误输出:\n%s\n", name, errBuf.String())
+		sendNotify(sm.WebHook, name, fmt.Sprintf("service exit：%d times", state.FailCount), err.Error())
+	} else {
+		sendNotify(sm.WebHook, name, fmt.Sprintf("service exit：%d times", state.FailCount), "正常退出")
+	}
 
-	log.Printf("服务 [%s] 退出: %v\n", name, err)
 	if state.FailCount <= 3 {
-		sendNotify(sm.WebHook, name, "service exit", err.Error())
 		time.AfterFunc(2*time.Second, func() {
 			sm.TryRunService(name)
 		})
@@ -273,5 +289,6 @@ func main() {
 	}
 
 	go registerRoutes(manager)
+
 	select {} // 保持运行
 }
