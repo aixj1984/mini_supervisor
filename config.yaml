@@ -1,4 +1,4 @@
-webhook_url: https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx
+webhook_url: https://open.feishu.cn/open-apis/bot/v2/hook/a54c101d-f3b7-452a-a19b-24029ca8cb57mi
 
 log:
   file: logs/app.log # 日志文件路径
@@ -19,7 +19,7 @@ services:
     auto: true
     retry_count: 3
   - name: telnet
-    cmd: ["./test.exe"]
+    cmd: ["./test-demo.exe"]
     work_dir: E:\\01project\\00go\\mini_supervisor
     auto: true
     retry_count: 3
