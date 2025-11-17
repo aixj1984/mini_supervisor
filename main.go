@@ -27,10 +27,11 @@ type LogConfig struct {
 }
 
 type Service struct {
-	Name    string   `yaml:"name"`
-	Cmd     []string `yaml:"cmd"`
-	WorkDir string   `yaml:"work_dir"`
-	Auto    bool     `yaml:"auto"`
+	Name       string   `yaml:"name"`
+	Cmd        []string `yaml:"cmd"`
+	WorkDir    string   `yaml:"work_dir"`
+	Auto       bool     `yaml:"auto"`
+	RetryCount int      `yaml:"retry_count"`
 }
 
 type ServiceState struct {
@@ -93,7 +94,7 @@ func (sm *ServiceManager) TryRunService(name string) {
 		log.Printf("服务 [%s] 未找到\n", name)
 		return
 	}
-	if state.FailCount >= 3 {
+	if state.FailCount >= svc.RetryCount {
 		sm.Mutex.Unlock()
 		log.Printf("服务 [%s] 超过失败上限，暂停自动重启\n", name)
 		return
@@ -117,7 +118,7 @@ func (sm *ServiceManager) TryRunService(name string) {
 		state.FailCount++
 		sm.Mutex.Unlock()
 
-		log.Printf("服务 [%s] 启动失败: %v\n", name, err)
+		log.Printf("服务 [%s] 启动失败: %s\n", name, err.Error())
 		log.Printf("执行路径: %s, 工作目录: %s\n", cmd.Path, cmd.Dir)
 		sendNotify(sm.WebHook, name, fmt.Sprintf("launch error：%d times", state.FailCount), err.Error())
 		time.AfterFunc(3*time.Second, func() { sm.TryRunService(name) })
@@ -147,7 +148,13 @@ func (sm *ServiceManager) waitForExit(name string, cmd *exec.Cmd, errBuf *bytes.
 		sendNotify(sm.WebHook, name, fmt.Sprintf("service exit：%d times", state.FailCount), "正常退出")
 	}
 
-	if state.FailCount <= 3 {
+	svc, ok := sm.Configs[name]
+	if !ok {
+		log.Printf("服务 [%s] 未找到\n", name)
+		return
+	}
+
+	if state.FailCount <= svc.RetryCount {
 		time.AfterFunc(2*time.Second, func() {
 			sm.TryRunService(name)
 		})
@@ -297,6 +304,10 @@ func main() {
 	}()
 
 	for _, svc := range cfg.Services {
+		// 重试次数默认值
+		if svc.RetryCount <= 0 {
+			svc.RetryCount = 3
+		}
 		manager.Configs[svc.Name] = svc
 		manager.States[svc.Name] = &ServiceState{}
 		if svc.Auto {

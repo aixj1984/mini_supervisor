@@ -3,3 +3,4 @@ mini_supervisor.exe
 dist/*
 logs/*
 config.yaml
+test.exe
